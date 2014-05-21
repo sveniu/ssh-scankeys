@@ -1,15 +1,28 @@
 Source: ssh-scankeys
-Section: unknown
-Priority: extra
+Section: utils
+Priority: optional
 Maintainer: Sven Ulland <sveniu@ifi.uio.no>
 Build-Depends: debhelper (>= 8.0.0)
 Standards-Version: 3.9.3
-Homepage: <insert the upstream URL, if relevant>
-#Vcs-Git: git://git.debian.org/collab-maint/ssh-scankeys.git
-#Vcs-Browser: http://git.debian.org/?p=collab-maint/ssh-scankeys.git;a=summary
+Homepage: https://github.com/sveniu/ssh-scankeys
+Vcs-Git: https://github.com/sveniu/ssh-scankeys.git
+Vcs-Browser: https://github.com/sveniu/ssh-scankeys
 
 Package: ssh-scankeys
-Architecture: any
+Architecture: all
 Depends: ${shlibs:Depends}, ${misc:Depends}
-Description: <insert up to 60 chars description>
- <insert long description, indented with spaces>
+Description: Scan for OpenSSH authorized and private keys
+ The scan-authkeys script will derive the list of authorized key file patterns
+ from sshd's own configuration and expand any username and homedir tokens to
+ obtain the full path to all authorized key files. It then scans all files and
+ prints a formatted output consisting of username; file owner, group, mode and
+ mtime; pubkey fingerprint, bit length and type; file path, and finally the
+ full pubkey with any options and comments.
+ .
+ The scan-privkeys script will by default scan all home directories for files
+ matching id_* (but not *.pub), and then extract the public key if possible. It
+ prints a formatted output for each key consisting of file owner, group, mode
+ and mtime; pubkey fingerprint, bit length, type and encryption status; file
+ path; full pubkey with any options and comments. Alternatively, scan-privkeys
+ can scan all file systems for files with a size range that could contain
+ private keys.
