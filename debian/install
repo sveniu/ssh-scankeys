@@ -1,0 +1,2 @@
+scan-authkeys usr/sbin
+scan-privkeys usr/sbin
