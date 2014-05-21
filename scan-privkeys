@@ -60,7 +60,7 @@ trap cleanup EXIT QUIT TERM ALRM ABRT INT
 
 # Create temporary working directory. Try /dev/shm first, as it will
 # work, regardless of filesystem state.
-tmpdir=`mktemp -d /dev/shm/hoardr.XXXXXXXXXX 2>/dev/null` ||
+tmpdir=`mktemp -d /dev/shm/scankeys.XXXXXXXXXX 2>/dev/null` ||
 	tmpdir=`mktemp -d` || exit 1
 
 # List of known SSH private key headers.
