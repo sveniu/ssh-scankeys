@@ -1,0 +1,114 @@
+#!/bin/sh
+
+# License: Creative Commons CC0.
+
+# Scan and print authorized public keys.
+#
+# Based on the OpenSSH sshd configuration and the list of system
+# users, return all public keys listed in any authorized_keys file
+# that can concievably be valid.
+#
+# TODO:
+# * Improve portability.
+# * More robust file path handling.
+# * Avoid duplicates when there's no username or homedir expansion.
+
+cleanup () {
+	test -d "$tmpdir" && rm -rf "$tmpdir"
+}
+
+trap cleanup EXIT QUIT TERM ALRM ABRT INT
+
+# Create temporary working directory. Try /dev/shm first, as it will
+# work, regardless of filesystem state.
+tmpdir=`mktemp -d /dev/shm/hoardr.XXXXXXXXXX 2>/dev/null` ||
+	tmpdir=`mktemp -d` || exit 1
+
+# Parse line from authorized_keys and output formatted data.
+output_akline () {
+	echo "$line" > "$tmpdir"/pubkey
+	ssh-keygen -l -f "$tmpdir"/pubkey > \
+			"$tmpdir"/pubkey_fp 2> /dev/null && {
+
+		# Obtain key type. Older OpenSSH versions don't print
+		# the key type at the end of the ssh-keygen -l output.
+		keytype=`grep -E -o "\((RSA1|RSA|DSA|ECDSA|ED25519)\)$" \
+				"$tmpdir"/pubkey_fp | tr -d '()'`
+		test "x$keytype" = "x" && keytype="NA"
+
+		# Key fingerprint.
+		fingerprint=`awk '{print $2}' < "$tmpdir"/pubkey_fp`
+		echo "$fingerprint" | grep -q -E "[0-9a-f:]{47}" ||
+			fingerprint=""
+
+		# Key size
+		keysize=`awk '{print $1}' < "$tmpdir"/pubkey_fp`
+		test "$keysize" -gt 0 2>/dev/null || keysize=0
+	}
+
+	# Print pubkey in specific format.
+	printf "%s;%s;%s;%s;%s;%s;%s;%s;%s;%s\n" \
+		"$user" \
+		"$uid" \
+		"$gid" \
+		"$mode" \
+		"$mtime" \
+		"$fingerprint" \
+		"$keysize" \
+		"$keytype" \
+		"$abspath" \
+		"$line"
+}
+
+# Obtain the AuthorizedKeysFile configuration values:
+# * Keyword is either AuthorizedKeysFile or AuthorizedKeysFile2;
+# * Value is one or more path templates with optional tokens;
+# * Use OpenSSH v5.1 -T configuration output option;
+# * Fallback to naive grep "^[[:space:]]*authorizedkeysfile";
+# * Fallback to default .ssh/authorized_keys{,2}.
+akconfig="$tmpdir"/akconfig.sshd
+stderr="$tmpdir"/stderr.sshd
+sshd -T > "$akconfig" 2> "$stderr" ||
+	grep -i "^[[:space:]]*authorizedkeysfile" \
+			/etc/ssh/sshd_config > "$akconfig" ||
+		echo "authorizedkeysfile .ssh/authorized_keys " \
+		     ".ssh/authorized_keys2" > "$akconfig"
+
+# Iterate over AuthorizedKeysFile path templates.
+awk '/[Aa]uthorized[Kk]eys[Ff]ile/{$1=""; print;}' < "$akconfig" |
+		tr ' ' '\n' |
+		grep -v "^$" |
+		while read path
+do
+	# Iterate over users.
+	getent passwd | cut -d: -f1,6 | while IFS=: read user home
+	do
+		# Substitute tokens.
+		abspath=`echo "$path" |
+			sed -e "s,%h,$home,g" \
+			    -e "s,%u,$user,g" \
+			    -e "s,%%,%,g"`
+
+		# Convert relative to absolute path.
+		expr "$abspath" : "/" >/dev/null || abspath="$home/$path"
+		test -f "$abspath" || continue
+
+		# Obtain meta data. This is not portable, as it relies
+		# on GNU stat(1) and its -c formatting option.
+		stat -c "%U %G %a %Y" "$abspath" > "$tmpdir"/stat
+		read uid gid mode mtime < "$tmpdir"/stat
+
+		# List the authorized keys.
+		grep -v "^[[:space:]]*#" "$abspath" |
+				grep -v "^[[:space:]]*$" |
+				while read line
+		do
+			# Many variables are carried over and used in
+			# the handle_akline function. That's pretty
+			# ugly!
+			output_akline "$line"
+		done
+	done
+done
+
+exit 0

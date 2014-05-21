@@ -1,0 +1,293 @@
+#!/bin/sh
+
+# License: Creative Commons CC0.
+
+# Scan and print private SSH keys.
+#
+# Via various heuristics, find all files that are likely to be SSH
+# private key files, and extract the fingerprint from them. Non-RSA1
+# private keys need to have their public key extracted first, which
+# will only work if the private key is unencrypted.
+#
+# The standard heuristic is to look for files named "id_*" and not
+# named "*.pub" in all user home directories. The "full" argument will
+# run a complete scan of all files, filtering on file sizes within
+# a range suitable for private keys: 200 to 14000 bytes.
+#
+# Figuring out if a key is encrypted is easy with ssh-keygen -y -f on
+# an interactive terminal. An encrypted key will result in a prompt,
+# written directly to /dev/tty. This makes ssh-keygen a horror to work
+# with non-interactively. Instead, we parse the key files manually.
+#
+# SSH private key file format 1.1:
+# The fingerprint can be read directly from a private key file,
+# regardless of it being encrypted or not. As for determining crypto:
+# Ref authfile.c:key_parse_private_rsa1(): Read one char after the
+# ASCII header, and map it to a cipher via cipher.c:cipher_by_number()
+# where we have cipher.h defining SSH_CIPHER_NONE 0.
+#
+# SSH2 private key files:
+# These are formatted using RFC 1421 PEM, which require the use of the
+# section 4.6.1.1 Proc-Type header field, where the value is a tuple
+# of version,string. The current version is 4, and the string
+# "ENCRYPTED" to indicate that the key is encrypted. We rely on this
+# header being accurate.
+#
+# OpenSSH private key format v1:
+# Ref authfile.c:key_parse_private2(). Uses uuencoding, but we can
+# make assumptions. After the base64 decode, we have the following:
+#   openssh-key-v1\x00\x00\x00\x00\x10aes256-cbc[...] (encrypted)
+#   openssh-key-v1\x00\x00\x00\x00\x04none[...]       (unencrypted)
+# So we simply read byte 20 through 24 and verify they say 'none\0'.
+#
+# As a fallback, if the private key is encrypted, the script assumes
+# that the public part of a private key $f is named $f.pub, without
+# actually verifying that it is so. This duplicates the behaviour of
+# ssh-keygen.
+#
+# TODO:
+# * Improve portability.
+# * More robust file path handling.
+# * Deduplicate results if scanned directories overlap.
+# * Support for Tectia SSH private key format.
+# * Support for Putty PPK private key format.
+
+cleanup () {
+	test -d "$tmpdir" && rm -rf "$tmpdir"
+}
+
+trap cleanup EXIT QUIT TERM ALRM ABRT INT
+
+# Create temporary working directory. Try /dev/shm first, as it will
+# work, regardless of filesystem state.
+tmpdir=`mktemp -d /dev/shm/hoardr.XXXXXXXXXX 2>/dev/null` ||
+	tmpdir=`mktemp -d` || exit 1
+
+# List of known SSH private key headers.
+cat > "$tmpdir"/known_formats << EOF
+^SSH PRIVATE KEY FILE FORMAT 1.1$
+^-----BEGIN RSA PRIVATE KEY-----$
+^-----BEGIN DSA PRIVATE KEY-----$
+^-----BEGIN EC PRIVATE KEY-----$
+^-----BEGIN OPENSSH PRIVATE KEY-----$
+EOF
+
+extract_pubkey () {
+	# Extract public key.
+	cp "$1" "$tmpdir"/privkey || return 1
+	chmod 400 "$tmpdir"/privkey # Avoid complaints.
+	ssh-keygen -y -f "$tmpdir"/privkey > "$tmpdir"/pubkey 2> /dev/null ||
+		return 1
+	ssh-keygen -l -f "$tmpdir"/pubkey > "$tmpdir"/pubkey_fp 2> /dev/null  ||
+		return 1
+	return 0
+}
+
+decode_ssh11 () {
+	# Return failure if key is encrypted.
+	test "`dd if="$1" bs=1 count=1 skip=33 2>/dev/null |
+			tr -d '\0' |
+			wc -c`" -eq 1 && {
+		touch "$tmpdir"/privkey_encrypted
+
+		# The key is encrypted, but we can obtain the fingerprint.
+		ssh-keygen -l -f "$1" > "$tmpdir"/pubkey_fp 2> /dev/null
+		return 1
+	}
+
+	extract_pubkey "$1" || return 1
+}
+
+decode_ssh2 () {
+	# Return failure if key is encrypted.
+	test "`grep -i "^Proc-Type:" "$1" | cut -d, -f2`" = "ENCRYPTED" && {
+		touch "$tmpdir"/privkey_encrypted
+		return 1
+	}
+
+	extract_pubkey "$1" || return 1
+}
+
+decode_openssh1 () {
+	# Return failure if key is encrypted. This is not a very
+	# portable approach, as it relies on the base64(1) program
+	# from GNU coreutils. Fallbacks to openssl or perl/python
+	# could be added.
+	test "`sed 's/-----[A-Z ]\+-----//g' < "$1" |
+			base64 -d |
+			dd bs=1 count=5 skip=19 2>/dev/null |
+			tr -d '\0'`" = "none" || {
+		touch "$tmpdir"/privkey_encrypted
+		return 1
+	}
+
+	extract_pubkey "$1" || return 1
+}
+
+# Check whether $f.pub corresponds with the pubkey derived from the
+# private key, so we can confidently extract the key options and
+# comment fields from it. Write the full pubkey with options and
+# comment to filename "pubkey_full".
+#
+# Arg 1: Path to private key-derived pubkey.
+# Arg 2: Path to original .pub file.
+get_full_pubkey () {
+	# Extract only the fingerprint from both files.
+	fp1=`ssh-keygen -l -f "$1" 2>/dev/null |
+			grep -E -o "[0-9a-f:]{47}"`
+	fp2=`ssh-keygen -l -f "$2" 2>/dev/null |
+			grep -E -o "[0-9a-f:]{47}"`
+	test "`echo $fp1|wc -c`" -eq 48 || return 1
+	test "`echo $fp2|wc -c`" -eq 48 || return 1
+	test "$fp1" = "$fp2" || return 1
+
+	# Good match. Copy full .pub key to pubkey_full.
+	cp -a "$2" "$tmpdir"/pubkey_full || return 1
+	return 0
+}
+
+# Handle a potential private key file. Verify that it is a private
+# key, then try to extract the pubkey from it via various means. Print
+# the parsed data line by line.
+#
+# Arg 1: Path to file.
+handle_file () {
+	filename="$1"
+
+	# Remove crud from previous iteration.
+	rm -f "$tmpdir"/privkey* "$tmpdir"/pubkey*
+
+	# Verify that we're dealing with a private key. Only check the
+	# first few lines, in case the file is very large.
+	test -r "$filename" || continue
+	head -n2 "$filename" 2>/dev/null |
+			grep -q -f "$tmpdir"/known_formats ||
+		continue
+
+	# Get file header. Avoid head(1) in case there is spurious
+	# newlines on the top of the file.
+	header=`grep -a -m 1 "PRIVATE KEY" "$filename"`
+
+	# Decode according to header. These functions will write some
+	# files for later use:
+	# * $tmpdir/privkey_encrypted if the key is encrypted;
+	# * $tmpdir/pubkey if the pubkey was extracted.
+	# * $tmpdir/pubkey_fp if the fingerprint was extracted.
+	case "$header" in
+		"SSH PRIVATE KEY FILE FORMAT 1.1")
+			decode_ssh11 "$filename"
+			;;
+		*"BEGIN OPENSSH PRIVATE KEY"*)
+			decode_openssh1 "$filename"
+			;;
+		*"PRIVATE KEY"*)
+			decode_ssh2 "$filename"
+			;;
+	esac
+
+	test -f "$tmpdir"/pubkey && {
+		test -f "$filename".pub && {
+			# Try to get original .pub content, as it
+			# contains useful options and comments.
+			get_full_pubkey \
+					"$tmpdir"/pubkey \
+					"$filename".pub
+		}
+	} || {
+		# Fallback: Assume the .pub file corresponds with the
+		# private key. FIXME: Really rely on this?
+		test -f "$filename".pub && {
+			cp -a "$filename".pub "$tmpdir"/pubkey
+			cp -a "$filename".pub "$tmpdir"/pubkey_full
+			ssh-keygen -l -f "$tmpdir"/pubkey > \
+					"$tmpdir"/pubkey_fp
+		}
+	}
+
+	# Verify presence of pubkey.
+	test -f "$tmpdir"/pubkey || continue
+
+	# Obtain private key meta data. This is not portable, as it
+	# relies on GNU stat(1) and its -c formatting option.
+	stat -c "%U %G %a %Y" "$filename" > "$tmpdir"/stat
+	read uid gid mode mtime < "$tmpdir"/stat
+	test "$uid" = "UNKNOWN" && uid=""
+	test "$gid" = "UNKNOWN" && gid=""
+
+	# Obtain key type. Older OpenSSH versions don't print the key
+	# type at the end of the ssh-keygen -l output.
+	keytype=`grep -E -o "\((RSA1|RSA|DSA|ECDSA|ED25519)\)$" \
+			"$tmpdir"/pubkey_fp | tr -d '()'`
+	test "x$keytype" = "x" && keytype="NA"
+
+	# Key fingerprint.
+	fingerprint=`awk '{print $2}' < "$tmpdir"/pubkey_fp`
+	echo "$fingerprint" | grep -q -E "[0-9a-f:]{47}" ||
+		fingerprint=""
+
+	# Key size
+	keysize=`awk '{print $1}' < "$tmpdir"/pubkey_fp`
+	test "$keysize" -gt 0 2>/dev/null || keysize=0
+
+	# Key encryption variable.
+	test -f "$tmpdir"/privkey_encrypted &&
+		encryption=1 ||
+		encryption=0
+
+	# Full pubkey string.
+	test -f "$tmpdir"/pubkey_full &&
+		pubkey=`head -n1 "$tmpdir"/pubkey_full` ||
+		pubkey=`head -n1 "$tmpdir"/pubkey`
+
+	# Print pubkey in specific format.
+	printf "%s;%s;%s;%s;%s;%s;%s;%s;%s;%s\n" \
+			"$uid" \
+			"$gid" \
+			"$mode" \
+			"$mtime" \
+			"$fingerprint" \
+			"$keysize" \
+			"$keytype" \
+			"$encryption" \
+			"$filename" \
+			"$pubkey"
+}
+
+# Scan user home directories for files matching id_*, but not *.pub.
+scan_homes () {
+	getent passwd | cut -d: -f6 | sort -u | while read home
+	do
+		find "$home" -name id_\* -not -name \*.pub -type f \
+				2>/dev/null | while read filename
+		do
+			handle_file "$filename"
+		done
+	done
+}
+
+# Scan the system for files between 200 and 14000 bytes. The smallest
+# keys are typically ECDSA 256-bit keys with no encryption, which are
+# around 220+ bytes. The largest are RSA 16384-bit keys, around
+# 12.5kB. In older versions, OpenSSH allowed creation of 32768-bit RSA
+# keys, which would be around 25kB, but they are unfeasible to create
+# and use, so we skip them. The min/max sizes are rounded down/up to
+# account for formatting and encoding differences.
+scan_full () {
+	find / -type f -size +200c -size -14000c \
+			2>/dev/null | while read filename
+	do
+		handle_file "$filename"
+	done
+}
+
+# Select scan type based on first argument.
+case "$1" in
+	"full")
+		scan_full
+		;;
+	*)
+		scan_homes
+		;;
+esac
+
+exit 0
