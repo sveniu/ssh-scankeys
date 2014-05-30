@@ -72,6 +72,14 @@ cat > "$tmpdir"/known_formats << EOF
 ^-----BEGIN OPENSSH PRIVATE KEY-----$
 EOF
 
+# Helper map for key types.
+cat > "$tmpdir"/key_type_map << EOF
+ssh-rsa RSA
+ssh-dss DSA
+ecdsa-sha2-nistp256 ECDSA
+ssh-ed25519 ED25519
+EOF
+
 extract_pubkey () {
 	# Extract public key.
 	cp "$1" "$tmpdir"/privkey || return 1
@@ -218,6 +226,15 @@ handle_file () {
 	# type at the end of the ssh-keygen -l output.
 	keytype=`grep -E -o "\((RSA1|RSA|DSA|ECDSA|ED25519)\)$" \
 			"$tmpdir"/pubkey_fp | tr -d '()'`
+	test "x$keytype" = "x" && {
+		pubkey_type=`tr ' ' '\n' < "$tmpdir"/pubkey |
+			grep -m 1 -E -o "(ssh-rsa|ssh-dss|ecdsa-sha2-nistp256|ssh-ed25519)"`
+		while read key_type key_name
+		do
+			test "$pubkey_type" = "$key_type" &&
+				keytype="$key_name"
+		done < "$tmpdir"/key_type_map
+	}
 	test "x$keytype" = "x" && keytype="NA"
 
 	# Key fingerprint.
