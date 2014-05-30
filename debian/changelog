@@ -1,3 +1,9 @@
+ssh-scankeys (0.0.2-1) unstable; urgency=medium
+
+  * New release, ssh-scankeys 0.0.2.
+
+ -- Sven Ulland <sveniu@ifi.uio.no>  Fri, 30 May 2014 14:15:00 +0200
+
 ssh-scankeys (0.0.1-1) unstable; urgency=medium
 
   * New release, ssh-scankeys 0.0.1.
