@@ -167,10 +167,10 @@ handle_file () {
 
 	# Verify that we're dealing with a private key. Only check the
 	# first few lines, in case the file is very large.
-	test -r "$filename" || continue
+	test -r "$filename" || return 1
 	head -n2 "$filename" 2>/dev/null |
 			grep -q -f "$tmpdir"/known_formats ||
-		continue
+		return 1
 
 	# Get file header. Avoid head(1) in case there is spurious
 	# newlines on the top of the file.
@@ -213,7 +213,7 @@ handle_file () {
 	}
 
 	# Verify presence of pubkey.
-	test -f "$tmpdir"/pubkey || continue
+	test -f "$tmpdir"/pubkey || return 1
 
 	# Obtain private key meta data. This is not portable, as it
 	# relies on GNU stat(1) and its -c formatting option.
