@@ -273,11 +273,12 @@ ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-ed25519)"`
 			"$pubkey"
 }
 
-# Scan user home directories for files matching id_*, but not *.pub.
+# Scan user ~/.ssh directories for any file other than *.pub.
 scan_homes () {
 	getent passwd | cut -d: -f6 | sort -u | while read home
 	do
-		find "$home" -name id_\* -not -name \*.pub -type f \
+		test -d "$home"/.ssh || continue
+		find "$home"/.ssh -not -name \*.pub -type f \
 				2>/dev/null | while read filename
 		do
 			handle_file "$filename"
