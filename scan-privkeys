@@ -273,6 +273,49 @@ ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-ed25519)"`
 			"$pubkey"
 }
 
+# Handle a potential agent socket. Verify that it is a socket and then
+# try to list all its identities. Print the parsed data line by line.
+#
+# Arg 1: Path to socket
+handle_sock () {
+	sockname="$1"
+
+	# Verify that we're dealing with a socket.
+	test -S "$sockname" || return 1
+
+	# Obtain socket file meta data. This is not portable, as it
+	# relies on GNU stat(1) and its -c formatting option.
+	stat -c "%U %G %a %Y" "$sockname" > "$tmpdir"/stat
+	read uid gid mode mtime < "$tmpdir"/stat
+	test "$uid" = "UNKNOWN" && uid=""
+	test "$gid" = "UNKNOWN" && gid=""
+
+	# Extract identities from agent socket.
+	SSH_AUTH_SOCK="$sockname" ssh-add -l \
+		> "$tmpdir"/pubkey_fp 2>/dev/null || return 1
+
+	# Exit if no identities found.
+	test -s "$tmpdir"/pubkey_fp || return 0
+
+	# Loop over identities.
+	while read keysize fingerprint remotepath keytype foo
+	do
+		keytype=`echo $keytype|tr -d '()'`
+		# Print pubkey in specific format.
+		printf "%s;%s;%s;%s;%s;%s;%s;%s;%s;%s\n" \
+				"$uid" \
+				"$gid" \
+				"$mode" \
+				"$mtime" \
+				"$fingerprint" \
+				"$keysize" \
+				"$keytype" \
+				"0" \
+				"$sockname" \
+				"remote_path=$remotepath"
+	done < "$tmpdir"/pubkey_fp
+}
+
 # Scan user ~/.ssh directories for any file other than *.pub.
 scan_homes () {
 	getent passwd | cut -d: -f6 | sort -u | while read home
@@ -300,6 +343,44 @@ scan_full () {
 		handle_file "$filename"
 	done
 }
+
+# Find all SSH agent sockets via env variables or temp directories.
+scan_agents () {
+	# If available, scan environment variables.
+	test -f /proc/$$/environ && {
+		for fenv in /proc/*/environ
+		do
+			tr '\0' '\n' < "$fenv" | grep "^SSH_AUTH_SOCK=" |
+				cut -d= -f2 >> "$tmpdir"/auth_socks
+		done
+	}
+
+	# Handle entries in $TMPDIR/ssh-*/, used since OpenSSH v5.7p1.
+	test -n "$TMPDIR" && test -d "$TMPDIR" && {
+		for sock_path in "$TMPDIR"/ssh-*/agent.*
+		do
+			echo "$sock_path" >> "$tmpdir"/auth_socks
+		done
+	}
+
+	# Handle entries in /tmp/ssh-*/.
+	for sock_path in /tmp/ssh-*/agent.*
+	do
+		echo "$sock_path" >> "$tmpdir"/auth_socks
+	done
+
+	# Verify that we have some paths.
+	test -s "$tmpdir"/auth_socks || return 0
+
+	# Handle all found sockets.
+	sort -u "$tmpdir"/auth_socks | while read sock_path
+	do
+		handle_sock "$sock_path"
+	done
+}
+
+# Always scan for ssh agents, local or forwarded.
+scan_agents
 
 # Select scan type based on first argument.
 case "$1" in
