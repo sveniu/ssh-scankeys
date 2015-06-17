@@ -348,11 +348,10 @@ scan_full () {
 scan_agents () {
 	# If available, scan environment variables.
 	test -f /proc/$$/environ && {
-		for fenv in /proc/*/environ
-		do
-			tr '\0' '\n' < "$fenv" | grep "^SSH_AUTH_SOCK=" |
-				cut -d= -f2 >> "$tmpdir"/auth_socks
-		done
+		cat /proc/*/environ 2>/dev/null |
+			tr '\0' '\n' |
+			grep "^SSH_AUTH_SOCK=" |
+			cut -d= -f2 >> "$tmpdir"/auth_socks
 	}
 
 	# Handle entries in $TMPDIR/ssh-*/, used since OpenSSH v5.7p1.
