@@ -38,33 +38,32 @@ EOF
 output_akline () {
 	echo "$line" > "$tmpdir"/pubkey
 	ssh-keygen -l -f "$tmpdir"/pubkey > \
-			"$tmpdir"/pubkey_fp 2> /dev/null && {
+			"$tmpdir"/pubkey_fp 2> /dev/null || return
 
-		# Obtain key type. Older OpenSSH versions don't print
-		# the key type at the end of the ssh-keygen -l output.
-		keytype=`grep -E -o "\((RSA1|RSA|DSA|ECDSA|ED25519)\)$" \
-				"$tmpdir"/pubkey_fp | tr -d '()'`
-		test "x$keytype" = "x" && {
-			pubkey_type=`tr ' ' '\n' < "$tmpdir"/pubkey |
-				grep -m 1 -E -o "(ssh-rsa|ssh-dss|\
+	# Obtain key type. Older OpenSSH versions don't print
+	# the key type at the end of the ssh-keygen -l output.
+	keytype=`grep -E -o "\((RSA1|RSA|DSA|ECDSA|ED25519)\)$" \
+			"$tmpdir"/pubkey_fp | tr -d '()'`
+	test "x$keytype" = "x" && {
+		pubkey_type=`tr ' ' '\n' < "$tmpdir"/pubkey |
+			grep -m 1 -E -o "(ssh-rsa|ssh-dss|\
 ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-ed25519)"`
-			while read key_type key_name
-			do
-				test "$pubkey_type" = "$key_type" &&
-					keytype="$key_name"
-			done < "$tmpdir"/key_type_map
-		}
-		test "x$keytype" = "x" && keytype="NA"
-
-		# Key fingerprint.
-		fingerprint=`awk '{print $2}' < "$tmpdir"/pubkey_fp`
-		echo "$fingerprint" | grep -q -E "[0-9a-f:]{47}" ||
-			fingerprint=""
-
-		# Key size
-		keysize=`awk '{print $1}' < "$tmpdir"/pubkey_fp`
-		test "$keysize" -gt 0 2>/dev/null || keysize=0
+		while read key_type key_name
+		do
+			test "$pubkey_type" = "$key_type" &&
+				keytype="$key_name"
+		done < "$tmpdir"/key_type_map
 	}
+	test "x$keytype" = "x" && keytype="NA"
+
+	# Key fingerprint.
+	fingerprint=`awk '{print $2}' < "$tmpdir"/pubkey_fp`
+	echo "$fingerprint" | grep -q -E "[0-9a-f:]{47}" ||
+		fingerprint=""
+
+	# Key size
+	keysize=`awk '{print $1}' < "$tmpdir"/pubkey_fp`
+	test "$keysize" -gt 0 2>/dev/null || keysize=0
 
 	# Print pubkey in specific format.
 	printf "%s;%s;%s;%s;%s;%s;%s;%s;%s;%s\n" \
